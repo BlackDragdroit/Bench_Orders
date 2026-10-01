@@ -137,7 +137,7 @@ input::placeholder, textarea::placeholder{color:#6F6C87;}
 .route ol{margin-top:11px;}
 .empty{padding:50px 0; text-align:center; color:var(--dim); font-size:14px;}
 
-.stub{display:flex; justify-content:space-between; align-items:center; gap:12px; background:var(--panel);
+.stub{display:block; background:var(--panel);
   border:1px solid var(--line); border-left:3px solid var(--accent); border-radius:12px; padding:12px 14px; margin-bottom:8px;}
 .stub.parked{opacity:.62;}
 .stub h2{margin:0; font-size:17px; font-weight:500; letter-spacing:-.01em;}
@@ -145,11 +145,44 @@ input::placeholder, textarea::placeholder{color:#6F6C87;}
 .stub button{background:none; border:1px solid var(--line); border-radius:9px; padding:7px 12px; color:var(--dim); font-size:13px; white-space:nowrap;}
 .offline{background:var(--panel-2); border-radius:12px; padding:11px 13px; font-size:13px; color:var(--dim); margin-top:16px;}
 
+/* rating */
+.rate{position:relative; padding:4px 0 14px;}
+.rate-row{display:flex; align-items:center; gap:7px; flex-wrap:wrap;}
+.rate-q{flex:1 1 100%; font-size:13px; color:var(--dim);}
+.rate-row .vote:not(.sm){flex:1; justify-content:center;}
+.vote{display:inline-flex; align-items:center; gap:6px; background:var(--panel-2); border:1px solid var(--line);
+  border-radius:999px; padding:7px 13px; color:var(--dim); font-size:13px; font-weight:500;
+  transition:transform .12s, background .15s, color .15s, border-color .15s;}
+.vote svg{width:15px; height:15px; flex:none;}
+.vote.down svg{transform:scaleY(-1);}
+.vote:active{transform:scale(.93);}
+.vote.up.on{background:rgba(111,217,138,.14); border-color:#6FD98A; color:#6FD98A;}
+.vote.down.on{background:rgba(240,106,170,.12); border-color:#F06AAA; color:#F7A9CD;}
+.vote.sm{padding:6px 9px;}
+.comment{display:block; width:100%; margin-top:9px; background:var(--panel-2); border:1px solid var(--line); border-radius:11px;
+  padding:9px 12px; color:var(--text); font-family:inherit; font-size:16px; line-height:1.4; resize:vertical;}
+.stub-main{display:flex; justify-content:space-between; align-items:center; gap:10px;}
+.stub-btns{display:flex; gap:6px; align-items:center; flex:none;}
+.stub .comment{margin-top:10px;}
+
+/* learned */
+.learned{margin-top:14px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:13px;}
+.learned h3{margin:0 0 3px; font-size:14px; font-weight:500;}
+.learned .meta{margin:0 0 10px; font-size:12px; color:var(--dim);}
+.aff{display:grid; grid-template-columns:auto 1fr; gap:5px 12px; align-items:center; font-size:12px; color:var(--dim); margin:4px 0 12px;}
+.aff i{display:block; height:6px; border-radius:3px; background:var(--c); min-width:4px;}
+.learned .kit{margin-top:0;}
+.learned .row{display:flex; gap:8px; margin-top:9px;}
+.learned .row button{flex:1; background:var(--panel-2); border:1px solid var(--line); border-radius:10px; padding:9px; color:var(--dim); font-size:13px;}
+.learned .row button:disabled{opacity:.5;}
+
 @media (min-width:620px){
   body{padding:22px 24px 54px;}
   .grid{grid-template-columns:repeat(4,1fr);}
   .card{padding:22px 20px 0;}
   .rarity{margin:0 -20px; padding:13px 20px;}
+  .rate-q{flex:1 1 auto;}
+  .rate-row .vote:not(.sm){flex:0 0 auto;}
 }
 @media (prefers-reduced-motion:reduce){
   *{animation:none !important; transition:none !important;}
@@ -207,11 +240,110 @@ const domOf = id => DOMAINS.find(d=>d.id===id) || DOMAINS[0];
 
 /* ============================ state =========================== */
 const KEY = "drop:v2";
-let S = {bench:[], archive:[], kit:DEFAULT_KIT, apiKey:"", lastDomains:[]};
+let S = {bench:[], archive:[], kit:DEFAULT_KIT, apiKey:"", lastDomains:[], feedback:[], taste:"", tasteAt:0, sinceDistill:0};
 try { Object.assign(S, JSON.parse(localStorage.getItem(KEY) || "{}")); } catch(e){}
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} };
 
 let tab = "roll", order = null, rolling = null, error = "", kitOpen = false, drafts = {};
+let revealNext = false, distilling = false, learnMsg = "", distillTimer = null;
+
+/* =========================== feedback ========================= */
+// Every rating is stored with a copy of the project's key facts, so it survives
+// rerolls and drops. Ratings steer future rolls three ways:
+//   1. roll odds per field and intent (affinity)
+//   2. recent rated briefs as examples in the prompt
+//   3. a short taste profile the model rewrites every few ratings (distill)
+const DISTILL_EVERY = 5;
+const clip = (s,n) => { s = String(s||"").trim().replace(/\s+/g," "); return s.length > n ? s.slice(0,n-1)+"…" : s; };
+const fbOf = id => (S.feedback||[]).find(f => f.pid === id);
+const findProject = id => [order, ...S.bench, ...S.archive].find(p => p && p.id === id);
+const intentLabel = id => (INTENTS.find(i=>i.id===id)||{}).label || "?";
+
+function vote(pid, dir){
+  const p = findProject(pid); if (!p) return;
+  const v = dir === "up" ? 1 : -1;
+  const i = S.feedback.findIndex(f => f.pid === pid);
+  if (i > -1 && S.feedback[i].vote === v) { S.feedback.splice(i,1); save(); return; }   // tap again = undo
+  const f = i > -1 ? S.feedback.splice(i,1)[0] : {pid, comment:"", title:p.title, pitch:p.pitch,
+    domain:p.domain, intent:p.intent, difficulty:p.difficulty, scope:p.scope};
+  f.vote = v; f.at = Date.now();
+  S.feedback.unshift(f);                       // newest first
+  S.feedback = S.feedback.slice(0, 200);
+  S.sinceDistill = (S.sinceDistill||0) + 1;
+  save(); scheduleDistill();
+  if (navigator.vibrate) navigator.vibrate(10);
+}
+
+// Recency-weighted score -> multiplier on the roll odds. Clamped so nothing ever
+// disappears completely and nothing takes over: randomness stays the point.
+function affinity(field, value){
+  let score = 0;
+  (S.feedback||[]).forEach((f,i) => {
+    if (f[field] === value) score += f.vote * Math.pow(0.95, i) * (f.comment ? 1.3 : 1);
+  });
+  return Math.min(2.5, Math.max(0.35, Math.exp(0.3*score)));
+}
+
+function weightedPick(items, weightOf){
+  const ws = items.map(weightOf), total = ws.reduce((a,b)=>a+b, 0);
+  let r = Math.random()*total;
+  for (let i = 0; i < items.length; i++) { r -= ws[i]; if (r <= 0) return items[i]; }
+  return items[items.length-1];
+}
+
+const feedbackLine = f =>
+  `${f.vote>0?"+":"-"} [${domOf(f.domain).label}, ${intentLabel(f.intent)}, difficulty ${f.difficulty}/5] ${clip(f.title,60)}: ${clip(f.pitch,140)}` +
+  (f.comment ? ` | their comment: "${clip(f.comment,220)}"` : "");
+
+function feedbackBlock(){
+  const fb = S.feedback || [];
+  const picked = [...fb.filter(f=>f.vote>0).slice(0,8), ...fb.filter(f=>f.vote<0).slice(0,8)].sort((a,b)=>b.at-a.at);
+  let out = "";
+  if ((S.taste||"").trim()) out += `\nTheir taste, learned from earlier ratings (trust this):\n${clip(S.taste, 1200)}\n`;
+  if (picked.length) out += `\nHow they rated recent briefs (+ liked, - disliked, newest first):\n${picked.map(feedbackLine).join("\n")}\n
+Use this as direction: lean toward the spirit of what they liked without copying it, and steer clear of what they disliked. Their comments outrank bare votes. The field, difficulty and intent rolled below still apply.\n`;
+  return out;
+}
+
+function scheduleDistill(){
+  clearTimeout(distillTimer);
+  // wait a bit so a comment typed right after the vote makes it in
+  distillTimer = setTimeout(() => { if ((S.sinceDistill||0) >= DISTILL_EVERY) distill(); }, 15000);
+}
+
+async function distill(manual){
+  if (distilling || !(S.feedback||[]).length) return;
+  if (!navigator.onLine) { if (manual) { learnMsg = "Offline. Try again with a connection."; refreshSettings(); } return; }
+  distilling = true; learnMsg = ""; refreshSettings();
+  try {
+    const prompt = `You keep a short taste profile for one person who uses an app that suggests side projects (software, electronics, embedded, CAD and 3D printing, data and signals, bio and medical). Below are their current profile and their ratings of suggested projects (+ liked, - disliked, newest first, sometimes with a comment).
+
+Current profile:
+${(S.taste||"").trim() || "(empty)"}
+
+Ratings:
+${S.feedback.slice(0,40).map(feedbackLine).join("\n")}
+
+Rewrite the profile.
+- Max 120 words, plain text, a few short lines starting with "Likes:", "Dislikes:" or "Notes:".
+- Only state patterns the ratings actually support. Comments count more than bare votes; newer ratings outrank older ones.
+- The current profile may contain lines the person wrote themselves. Keep those unless newer ratings clearly contradict them.
+- Be concrete: kinds of projects, parts, techniques, difficulty, vibe. No filler.
+
+Output ONLY a JSON object: {"profile": "..."}`;
+    const r = await generate(prompt);
+    if (!r || typeof r.profile !== "string" || !r.profile.trim()) throw new Error("empty");
+    S.taste = r.profile.trim(); S.tasteAt = Date.now(); S.sinceDistill = 0; save();
+  } catch(e) {
+    if (manual) learnMsg = "Couldn't update the profile just now. Your ratings are kept.";
+  } finally {
+    distilling = false; refreshSettings();
+  }
+}
+
+// only re-render when the settings panel is what's on screen, so we never
+// yank focus out of a comment field
+function refreshSettings(){ if (tab === "roll" && kitOpen && !order && !rolling) render(); }
 
 /* ========================== generation ======================== */
 const SCHEMA = payoffSpec => `{
@@ -233,7 +365,7 @@ function buildPrompt(scope, domain, difficulty, intent, avoid){
 ${SCHEMA(payoffSpec)}
 
 The person: an engineering student who builds things for fun. Their kit and skills: ${S.kit}
-
+${feedbackBlock()}
 This brief:
 - Time budget: ${s.brief}. The estimate must be honest for someone working alone.
 - Field: ${d.id==="wildcard" ? "your choice, but make it unexpected — something they'd never pick off a list" : d.label}.
@@ -280,14 +412,11 @@ async function generate(prompt){
 function pickDomain(){
   // avoid repeating either of the last two fields
   const pool = DOMAINS.filter(d => !(S.lastDomains||[]).includes(d.id));
-  return rand(pool.length ? pool : DOMAINS);
+  return weightedPick(pool.length ? pool : DOMAINS, d => affinity("domain", d.id));
 }
 
 function pickIntent(){
-  const total = INTENTS.reduce((n,i)=>n+i.weight, 0);
-  let r = Math.random()*total;
-  for (const i of INTENTS) { r -= i.weight; if (r <= 0) return i; }
-  return INTENTS[0];
+  return weightedPick(INTENTS, i => i.weight * affinity("intent", i.id));
 }
 
 async function roll(scopeId){
@@ -298,7 +427,7 @@ async function roll(scopeId){
   const difficulty = randInt(s.diff[0], s.diff[1]);
   rolling = scopeId; error = ""; order = null; render();
   try {
-    const avoid = [...S.bench, ...S.archive].map(o=>o.title).slice(0,12);
+    const avoid = [...new Set([...S.bench, ...S.archive, ...S.feedback].map(o=>o.title).filter(Boolean))].slice(0,20);
     const raw = await generate(buildPrompt(scopeId, domain.id, difficulty, intent, avoid));
     order = Object.assign({}, raw, {
       id:"d"+Date.now(), domain:domain.id, domainLabel:domain.label, difficulty, scope:scopeId,
@@ -310,11 +439,54 @@ async function roll(scopeId){
   } catch(e) {
     error = e.message || "That didn't come back as a project. Tap again.";
   } finally {
-    rolling = null; render();
+    rolling = null; revealNext = !!order; render();
   }
 }
 
 /* ============================ views =========================== */
+const THUMB = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v11"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></svg>`;
+
+function voteBtns(o, compact){
+  const f = fbOf(o.id), v = f ? f.vote : 0;
+  return `<button class="vote up${v>0?" on":""}${compact?" sm":""}" data-vote="up" data-pid="${o.id}" aria-pressed="${v>0}" aria-label="Like">${THUMB}${compact?"":"<span>Like</span>"}</button>
+    <button class="vote down${v<0?" on":""}${compact?" sm":""}" data-vote="down" data-pid="${o.id}" aria-pressed="${v<0}" aria-label="Not for me">${THUMB}${compact?"":"<span>Not for me</span>"}</button>`;
+}
+
+function commentHTML(o){
+  const f = fbOf(o.id); if (!f) return "";
+  const ph = f.vote > 0 ? "What hit? (optional)" : "What's off? Too easy, wrong vibe, parts you don't have… (optional)";
+  return `<textarea class="comment" rows="2" maxlength="500" data-comment="${o.id}" placeholder="${ph}">${esc(f.comment)}</textarea>`;
+}
+
+function rateHTML(o){
+  const f = fbOf(o.id);
+  return `<div class="rate"><div class="rate-row">
+    <span class="rate-q">${f ? "Noted. Future rolls will lean on this." : "More like this, or not?"}</span>${voteBtns(o)}</div>
+    ${commentHTML(o)}</div>`;
+}
+
+function learnedHTML(){
+  const fb = S.feedback || [], up = fb.filter(f=>f.vote>0).length, down = fb.length - up;
+  const meta = fb.length
+    ? `${up} liked, ${down} disliked.` + (S.tasteAt ? ` Profile last rewritten ${new Date(S.tasteAt).toLocaleDateString()}.` : ` The profile gets written after ${DISTILL_EVERY} ratings.`)
+    : "Nothing yet. Rate a few rolls and this fills in.";
+  const bars = fb.length ? `<div class="aff">${DOMAINS.map(d => {
+      const a = affinity("domain", d.id);
+      return `<span>${d.label}</span><i style="--c:${d.color}; width:${Math.round(a/2.5*100)}%" title="×${a.toFixed(2)} roll odds"></i>`;
+    }).join("")}</div>` : "";
+  return `<div class="learned">
+    <h3>What Drop has learned</h3>
+    <p class="meta">${esc(meta)}</p>
+    ${bars}
+    <textarea class="kit" id="taste" rows="5" placeholder="Your taste profile. Drop rewrites it from your ratings every ${DISTILL_EVERY} ratings, and you can edit it yourself.">${esc(S.taste)}</textarea>
+    <div class="row">
+      <button data-act="distill" ${distilling || !fb.length ? "disabled" : ""}>${distilling ? "Learning…" : "Rewrite from ratings"}</button>
+      <button data-act="forget" ${fb.length || S.taste ? "" : "disabled"}>Forget all ratings</button>
+    </div>
+    ${learnMsg ? `<p class="meta" style="margin:9px 0 0">${esc(learnMsg)}</p>` : ""}
+  </div>`;
+}
+
 function cardHTML(o, full, inner){
   const d = domOf(o.domain), n = Number(o.difficulty)||3;
   const pips = [1,2,3,4,5].map(i => `<span class="${i<=n?"on":""}"></span>`).join("");
@@ -344,7 +516,7 @@ function rollView(){
       <p>Rolling ${s.label.toLowerCase()}…</p></div>`;
   }
   if (order) {
-    return `<div class="reveal">${cardHTML(order, true, `<div class="actions">
+    return `<div class="${revealNext ? "reveal" : ""}">${cardHTML(order, true, `${rateHTML(order)}<div class="actions">
       <button class="primary" data-act="keep">Take it on</button>
       <button data-act="reroll">Reroll</button>
       <button class="ghost" data-act="discard">Drop it</button>
@@ -361,6 +533,7 @@ function rollView(){
     ${kitOpen ? `
       <textarea class="kit" id="kit" rows="4" placeholder="What you've got to work with">${esc(S.kit)}</textarea>
       <input class="keyin" id="apikey" type="text" placeholder="Anthropic API key — leave empty if the server holds it" value="${esc(S.apiKey)}">
+      ${learnedHTML()}
     ` : ""}
     ${error ? `<p class="error">${esc(error)}</p>` : ""}`;
 }
@@ -377,6 +550,7 @@ function benchView(){
     <details class="route"><summary>Full ticket</summary>
       <ol class="steps">${(p.steps||[]).map(s=>`<li>${esc(s)}</li>`).join("")}</ol>
       ${p.gotcha ? `<p class="gotcha"><span>What'll bite you</span>${esc(p.gotcha)}</p>` : ""}</details>
+    ${rateHTML(p)}
     <div class="actions">
       <button class="primary" data-close="${p.id}" data-status="done">Finished</button>
       <button class="ghost" data-close="${p.id}" data-status="parked">Park it</button></div>
@@ -386,8 +560,11 @@ function benchView(){
 function archiveView(){
   if (!S.archive.length) return `<p class="empty">Nothing finished or parked yet.</p>`;
   return S.archive.map(p => `<div class="stub ${p.status}" style="--accent:${domOf(p.domain).color}">
-    <div><h2>${esc(p.title)}</h2><p>${p.status==="done"?"Finished":"Parked"} · ${new Date(p.closedAt).toLocaleDateString()} · ${(p.log||[]).length} entries</p></div>
-    <button data-revive="${p.id}">Resume</button></div>`).join("");
+    <div class="stub-main">
+      <div><h2>${esc(p.title)}</h2><p>${p.status==="done"?"Finished":"Parked"} · ${new Date(p.closedAt).toLocaleDateString()} · ${(p.log||[]).length} entries</p></div>
+      <div class="stub-btns">${voteBtns(p, true)}<button data-revive="${p.id}">Resume</button></div>
+    </div>
+    ${commentHTML(p)}</div>`).join("");
 }
 
 function render(){
@@ -398,12 +575,14 @@ function render(){
       <button class="${tab==="archive"?"on":""}" data-tab="archive">Archive</button>
     </nav>
     <main>${tab==="roll" ? rollView() : tab==="bench" ? benchView() : archiveView()}</main>`;
+  revealNext = false;   // the pop animation plays once per roll, not on every vote
 }
 
 /* =========================== events =========================== */
 document.addEventListener("click", e => {
-  const t = e.target.closest("[data-tab],[data-roll],[data-act],[data-log],[data-close],[data-revive]");
+  const t = e.target.closest("[data-tab],[data-roll],[data-act],[data-log],[data-close],[data-revive],[data-vote]");
   if (!t) return;
+  if (t.dataset.vote) { vote(t.dataset.pid, t.dataset.vote); return render(); }
   if (t.dataset.tab)  { tab = t.dataset.tab; error = ""; return render(); }
   if (t.dataset.roll) { return roll(t.dataset.roll); }
   if (t.dataset.log)  {
@@ -424,7 +603,12 @@ document.addEventListener("click", e => {
     save(); tab = "bench"; return render();
   }
   const a = t.dataset.act;
-  if (a === "togglekit") { kitOpen = !kitOpen; return render(); }
+  if (a === "togglekit") { kitOpen = !kitOpen; learnMsg = ""; return render(); }
+  if (a === "distill")   { return distill(true); }
+  if (a === "forget")    {
+    if (!confirm("Delete all ratings and the taste profile? Rolls go back to pure chance.")) return;
+    S.feedback = []; S.taste = ""; S.tasteAt = 0; S.sinceDistill = 0; save(); return render();
+  }
   if (a === "keep")     { S.bench.unshift(Object.assign({}, order, {log:[], next:"", startedAt:Date.now()})); save(); order=null; tab="bench"; return render(); }
   if (a === "reroll")   { return roll(order.scope); }
   if (a === "discard")  { order = null; return render(); }
@@ -436,6 +620,8 @@ document.addEventListener("input", e => {
   if (el.id === "apikey") { S.apiKey = el.value.trim(); save(); }
   if (el.dataset.next)    { const p = S.bench.find(x=>x.id===el.dataset.next); if (p) { p.next = el.value; save(); } }
   if (el.dataset.draft)   { drafts[el.dataset.draft] = el.value; }
+  if (el.id === "taste")  { S.taste = el.value; save(); }
+  if (el.dataset.comment) { const f = fbOf(el.dataset.comment); if (f) { f.comment = el.value.slice(0,500); save(); scheduleDistill(); } }
 });
 
 document.addEventListener("keydown", e => {
@@ -446,6 +632,7 @@ document.addEventListener("keydown", e => {
 });
 
 render();
+scheduleDistill();
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(()=>{});
 </script>
 </body>

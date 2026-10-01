@@ -29,7 +29,7 @@ app.post("/api/generate", async (req, res) => {
     return res.status(500).json({ error: "No ANTHROPIC_API_KEY set on the server." });
   }
   const prompt = req.body && req.body.prompt;
-  if (typeof prompt !== "string" || prompt.length > 8000) {
+  if (typeof prompt !== "string" || prompt.length > 16000) {
     return res.status(400).json({ error: "Bad prompt." });
   }
 
